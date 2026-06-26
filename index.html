@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ultimate Shooting - Full Integration</title>
+    <style>
+        body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; color: white; font-family: 'Courier New', Courier, monospace; overflow: hidden; touch-action: none; }
+        canvas { background: #000; border: 2px solid #0ff; box-shadow: 0 0 20px rgba(0,255,255,0.4); max-width: 100%; max-height: 90vh; touch-action: none; }
+        #ui { position: absolute; top: 10px; width: 380px; display: flex; justify-content: space-between; padding: 0 20px; pointer-events: none; text-shadow: 0 0 5px #0ff; font-weight: bold; z-index: 100; }
+        #hp-bar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 200px; height: 12px; border: 2px solid #0ff; background: rgba(0,0,0,0.5); border-radius: 5px; overflow: hidden; }
+        #hp-inner { width: 100%; height: 100%; background: #0ff; transition: width 0.2s; }
+        
+        /* バーチャルスティック */
+        #stick-base { position: absolute; width: 100px; height: 100px; background: rgba(255, 255, 255, 0.1); border: 2px solid rgba(0, 255, 255, 0.3); border-radius: 50%; display: none; pointer-events: none; z-index: 50; }
+        #stick-knob { position: absolute; width: 40px; height: 40px; background: rgba(0, 255, 255, 0.5); border-radius: 50%; transform: translate(-50%, -50%); left: 50px; top: 50px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>SCORE: <span id="score">0</span></div>
+        <div>LV: <span id="level">1</span></div>
+    </div>
+    
+    <div id="hp-bar"><div id="hp-inner"></div></div>
+    <div id="stick-base"><div id="stick-knob"></div></div>
+    
+    <canvas id="game" width="400" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+        const scoreEl = document.getElementById('score'), levelEl = document.getElementById('level'), hpInner = document.getElementById('hp-inner');
+        const stickBase = document.getElementById('stick-base'), stickKnob = document.getElementById('stick-knob');
+
+        // ゲーム状態
+        let score = 0, level = 1, hp = 3, gameActive = true, frame = 0, shake = 0;
+        const player = { x: 185, y: 500, w: 30, h: 30, speed: 5 };
+        const bullets = [], enemies = [], enemyBullets = [], particles = [], items = [];
+        const keys = {};
+
+        // タッチ操作用
+        let stickActive = false, stickStart = { x: 0, y: 0 }, stickVector = { x: 0, y: 0 };
+
+        // キーボードイベント
+        window.onkeydown = e => keys[e.code] = true;
+        window.onkeyup = e => keys[e.code] = false;
+
+        // タッチイベント (スティック)
+        window.addEventListener('touchstart', e => {
+            const t = e.touches[0];
+            stickActive = true;
+            stickStart = { x: t.clientX, y: t.clientY };
+            stickBase.style.display = 'block';
+            stickBase.style.left = `${t.clientX - 50}px`;
+            stickBase.style.top = `${t.clientY - 50}px`;
+        }, {passive: false});
+
+        window.addEventListener('touchmove', e => {
+            if (!stickActive) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            let dx = t.clientX - stickStart.x;
+            let dy = t.clientY - stickStart.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const maxRadius = 40;
+
+            if (dist > maxRadius) {
+                dx *= maxRadius / dist;
+                dy *= maxRadius / dist;
+            }
+            stickVector = { x: dx / maxRadius, y: dy / maxRadius };
+            stickKnob.style.left = `${50 + dx}px`;
+            stickKnob.style.top = `${50 + dy}px`;
+        }, {passive: false});
+
+        window.addEventListener('touchend', () => {
+            stickActive = false;
+            stickVector = { x: 0, y: 0 };
+            stickBase.style.display = 'none';
+        });
+
+        // 共通関数
+        function createExplosion(x, y, color, count=10) {
+            shake = 8;
+            for(let i=0; i<count; i++) {
+                particles.push({ 
+                    x, y, 
+                    dx: (Math.random()-0.5)*10, 
+                    dy: (Math.random()-0.5)*10, 
+                    life: 30, color 
+                });
+            }
+        }
+
+        function takeDamage() {
+            hp--;
+            hpInner.style.width = (hp/3 * 100) + "%";
+            createExplosion(player.x + 15, player.y + 15, '#fff', 20);
+            if (hp <= 0) {
+                gameActive = false;
+                setTimeout(() => { 
+                    alert("GAME OVER!\nFinal Score: " + score + "\nFinal Level: " + level); 
+                    location.reload(); 
+                }, 10);
+            }
+        }
+
+        function update() {
+            if (!gameActive) return;
+            frame++;
+            if (shake > 0) shake--;
+
+            // レベルシステム (Lv.100まで)
+            level = Math.min(100, Math.floor(score / 50) + 1);
+            levelEl.innerText = level;
+
+            // 移動 (キーボード + スティック)
+            let mx = 0, my = 0;
+            if (keys['ArrowLeft']) mx -= 1;
+            if (keys['ArrowRight']) mx += 1;
+            if (keys['ArrowUp']) my -= 1;
+            if (keys['ArrowDown']) my += 1;
+
+            const pSpeed = 5 + (level * 0.05);
+            player.x += (mx * pSpeed) + (stickVector.x * pSpeed);
+            player.y += (my * pSpeed) + (stickVector.y * pSpeed);
+            
+            // 画面外防止
+            player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+            player.y = Math.max(0, Math.min(canvas.height - player.h, player.y));
+
+            // 自動射撃 (レベルに応じて弾数アップ)
+            const fireRate = Math.max(3, 8 - Math.floor(level/20));
+            if ((keys['Space'] || stickActive) && frame % fireRate === 0) {
+                const bCount = Math.min(5, Math.floor(level/20) + 1);
+                for(let i=0; i<bCount; i++) {
+                    bullets.push({ 
+                        x: player.x + (player.w/bCount)*i + (player.w/bCount/2) - 2, 
+                        y: player.y, w: 4, h: 12 
+                    });
+                }
+            }
+
+            // 敵の生成
+            if (frame % Math.max(8, 40 - level) === 0) {
+                enemies.push({ 
+                    x: Math.random()*370, y: -30, w: 30, h: 30, 
+                    hp: 1 + Math.floor(level/15), 
+                    speed: 2 + (level*0.05) 
+                });
+            }
+
+            // 更新: 弾
+            bullets.forEach((b, i) => { b.y -= 12; if(b.y < -20) bullets.splice(i, 1); });
+
+            // 更新: 敵の弾
+            enemyBullets.forEach((eb, i) => { 
+                eb.y += 5; 
+                if(eb.x < player.x+player.w && eb.x+4 > player.x && eb.y < player.y+player.h && eb.y+10 > player.y) {
+                    takeDamage(); enemyBullets.splice(i, 1);
+                }
+                if(eb.y > 600) enemyBullets.splice(i, 1);
+            });
+
+            // 更新: アイテム
+            items.forEach((it, i) => {
+                it.y += 2;
+                if (it.x < player.x+player.w && it.x+it.w > player.x && it.y < player.y+player.h && it.y+it.h > player.y) {
+                    hp = Math.min(3, hp + 1);
+                    hpInner.style.width = (hp/3 * 100) + "%";
+                    items.splice(i, 1);
+                }
+                if (it.y > 600) items.splice(i, 1);
+            });
+
+            // 更新: 敵
+            enemies.forEach((e, i) => {
+                e.y += e.speed;
+                // 反撃 (Lv10から)
+                if (level >= 10 && Math.random() < 0.02) enemyBullets.push({ x: e.x + 13, y: e.y + 30 });
+
+                bullets.forEach((b, bi) => {
+                    if (b.x < e.x + e.w && b.x + b.w > e.x && b.y < e.y + e.h && b.y + b.h > e.y) {
+                        e.hp--; bullets.splice(bi, 1);
+                        if(e.hp <= 0) {
+                            createExplosion(e.x + 15, e.y + 15, '#f55');
+                            if (Math.random() < 0.15) items.push({ x: e.x, y: e.y, w: 20, h: 20 });
+                            enemies.splice(i, 1); score += 10; scoreEl.innerText = score;
+                        }
+                    }
+                });
+                if (player.x < e.x+e.w-5 && player.x+player.w > e.x+5 && player.y < e.y+e.h-5 && player.y+player.h > e.y+5) {
+                    takeDamage(); enemies.splice(i, 1);
+                }
+                if (e.y > canvas.height) enemies.splice(i, 1);
+            });
+
+            particles.forEach((p, i) => { p.x += p.dx; p.y += p.dy; p.life--; if(p.life <= 0) particles.splice(i, 1); });
+        }
+
+        function draw() {
+            ctx.save();
+            if (shake > 0) ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake);
+            ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 400, 600);
+
+            // 背景星
+            [0.5, 1, 2].forEach((s, l) => {
+                ctx.fillStyle = l === 2 ? '#fff' : '#444';
+                for(let i=0; i<10; i++) ctx.fillRect((i*123 + frame*s) % 400, (i*193 + frame*s*2) % 600, l+1, l+1);
+            });
+
+            // 回復アイテム
+            ctx.shadowBlur = 10; ctx.shadowColor = '#0f0'; ctx.fillStyle = '#0f0';
+            items.forEach(it => {
+                ctx.fillRect(it.x + 8, it.y, 4, 20); ctx.fillRect(it.x, it.y + 8, 20, 4);
+            });
+
+            // プレイヤー
+            ctx.shadowBlur = 15; ctx.shadowColor = '#0ff'; ctx.fillStyle = '#0ff';
+            ctx.beginPath(); ctx.moveTo(player.x+15, player.y); ctx.lineTo(player.x, player.y+30); ctx.lineTo(player.x+30, player.y+30); ctx.fill();
+
+            // 弾
+            ctx.shadowBlur = 10; ctx.shadowColor = '#ff0'; ctx.fillStyle = '#ff0';
+            bullets.forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+            ctx.shadowColor = '#f0f'; ctx.fillStyle = '#f0f';
+            enemyBullets.forEach(eb => ctx.fillRect(eb.x, eb.y, 4, 10));
+
+            // 敵
+            ctx.shadowBlur = 5; ctx.shadowColor = '#f00'; ctx.fillStyle = '#f55';
+            enemies.forEach(e => {
+                ctx.fillRect(e.x, e.y, e.w, e.h); ctx.strokeStyle = '#fff'; ctx.strokeRect(e.x+5, e.y+5, 20, 20);
+            });
+
+            // 爆発
+            ctx.shadowBlur = 0;
+            particles.forEach(p => { ctx.fillStyle = p.color; ctx.globalAlpha = p.life/30; ctx.fillRect(p.x, p.y, 3, 3); });
+            ctx.globalAlpha = 1.0;
+            ctx.restore();
+            requestAnimationFrame(() => { update(); draw(); });
+        }
+        draw();
+    </script>
+</body>
+</html>
